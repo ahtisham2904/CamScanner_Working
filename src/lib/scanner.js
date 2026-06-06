@@ -54,57 +54,56 @@ export function ensureOpenCV() {
 
     /* ---------- document detection (the professional part) ---------- */
     /* Returns 4 ordered corners in canvas pixel coords, or null. */
-    export async function detectDocument(canvas) {
-    let cv;
-    try { cv = await ensureOpenCV(); } catch { return null; }
+export async function detectDocument(canvas) {
+  let cv;
+  try { cv = await ensureOpenCV(); } catch { return null; }
+  const W = canvas.width, H = canvas.height;
+  let src, small, gray, bin, kernel, contours, hierarchy;
+  try {
+    src = cv.imread(canvas);
+    const scale = 600 / Math.max(W, H);
+    small = new cv.Mat();
+    cv.resize(src, small, new cv.Size(Math.round(W * scale), Math.round(H * scale)));
+    gray = new cv.Mat();
+    cv.cvtColor(small, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
+    bin = new cv.Mat();
+    cv.Canny(gray, bin, 50, 150);
+    kernel = cv.Mat.ones(7, 7, cv.CV_8U);
+    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel);
 
-    const W = canvas.width, H = canvas.height;
-    let src, small, gray, edges, kernel, contours, hierarchy;
-    try {
-        src = cv.imread(canvas);
-        // downscale for speed + noise reduction
-        const scale = 600 / Math.max(W, H);
-        small = new cv.Mat();
-        cv.resize(src, small, new cv.Size(Math.round(W * scale), Math.round(H * scale)));
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
-        gray = new cv.Mat();
-        cv.cvtColor(small, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
-
-        edges = new cv.Mat();
-        cv.Canny(gray, edges, 60, 180);
-        kernel = cv.Mat.ones(5, 5, cv.CV_8U);
-        cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel); // close gaps in the border
-
-        contours = new cv.MatVector();
-        hierarchy = new cv.Mat();
-        cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-        const imgArea = small.rows * small.cols;
-        let bestPts = null, bestArea = 0;
-
-        for (let i = 0; i < contours.size(); i++) {
-        const c = contours.get(i);
-        const peri = cv.arcLength(c, true);
-        const approx = new cv.Mat();
-        cv.approxPolyDP(c, approx, 0.02 * peri, true);
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-            const area = cv.contourArea(approx);
-            if (area > bestArea && area > imgArea * 0.18) {
-            bestArea = area;
-            bestPts = [];
-            for (let k = 0; k < 4; k++)
-                bestPts.push({ x: approx.data32S[k * 2] / scale, y: approx.data32S[k * 2 + 1] / scale });
-            }
-        }
-        approx.delete(); c.delete();
-        }
-        return bestPts ? orderCorners(bestPts) : null;
-    } catch {
-        return null;
-    } finally {
-        [src, small, gray, edges, kernel, contours, hierarchy].forEach((m) => m && m.delete && m.delete());
+    const imgArea = small.rows * small.cols;
+    let quad = null, quadArea = 0, fb = null, fbArea = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const c = contours.get(i);
+      const area = cv.contourArea(c);
+      if (area < imgArea * 0.15) { c.delete(); continue; }
+      const peri = cv.arcLength(c, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(c, approx, 0.02 * peri, true);
+      if (approx.rows === 4 && cv.isContourConvex(approx) && area > quadArea) {
+        quadArea = area;
+        quad = [];
+        for (let k = 0; k < 4; k++) quad.push({ x: approx.data32S[k * 2] / scale, y: approx.data32S[k * 2 + 1] / scale });
+      }
+      if (area > fbArea) {
+        fbArea = area;
+        const r = cv.minAreaRect(c);
+        fb = cv.RotatedRect.points(r).map((p) => ({ x: p.x / scale, y: p.y / scale }));
+      }
+      approx.delete(); c.delete();
     }
+    const chosen = quad || (fbArea > imgArea * 0.25 ? fb : null);
+    return chosen ? orderCorners(chosen) : null;
+  } catch {
+    return null;
+  } finally {
+    [src, small, gray, bin, kernel, contours, hierarchy].forEach((m) => m && m.delete && m.delete());
+  }
 }
 
     /* ---------- smooth perspective de-skew (bilinear) ---------- */
