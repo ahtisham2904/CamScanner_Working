@@ -247,8 +247,6 @@ export default function App() {
         id: uid(), original, rotation: 0, corners: null,
         filter: "original", brightness: 0, contrast: 0, thumb: original,
       };
-      const ac = await autoCorners(page).catch(() => null);
-      page.corners = ac;
       page.thumb = await processPage(page);
       setPages((prev) => [...prev, page]);
     }
