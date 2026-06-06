@@ -645,3 +645,36 @@ svg { flex-shrink: 0; }
 
 /* ---------- Hidden file input ---------- */
 .hidden-file-input { display: none; }
+
+/* ---- editor: fit to screen + exact crop overlay ---- */
+.editor-wrap {
+  max-height: 100vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2rem;
+}
+.editor-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.editor-canvas {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  max-width: 100%;
+}
+.editor-stage-img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 58vh;   /* whole page always visible */
+}
+.editor-stage-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
