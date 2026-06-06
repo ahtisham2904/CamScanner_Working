@@ -543,8 +543,22 @@ function Editor({ page, onClose, onSave }) {
     ];
   }
 
+  const imgRef = useRef(null);
+  const [imgBox, setImgBox] = useState({ w: 0, h: 0 });
+
   const baseUrl = base ? base.toDataURL("image/jpeg", 0.85) : null;
   const scale = base && imgBox.w ? imgBox.w / base.width : 1;
+
+  useEffect(() => {
+    const measure = () => {
+      if (imgRef.current) setImgBox({ w: imgRef.current.clientWidth, h: imgRef.current.clientHeight });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (imgRef.current) ro.observe(imgRef.current);
+    window.addEventListener("orientationchange", measure);
+    return () => { ro.disconnect(); window.removeEventListener("orientationchange", measure); };
+  }, [base, baseUrl]); // eslint-disable-line
 
   // ---- pointer-based dragging (works for mouse AND touch) ----
   function startDrag(e, idx) {
