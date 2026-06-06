@@ -3,7 +3,7 @@ import { jsPDF } from "jspdf";
 import { detectDocument, magicColorPro, warpBilinear, ensureOpenCV } from "./lib/scanner";
 import Camera from "./Camera";
 import JSZip from "jszip";
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   Camera as CameraIcon, Upload, Image as ImageIcon, FileText, FileDown, Trash2,
   RotateCw, Check, X, Crop, Wand2, Sparkles,
@@ -11,10 +11,8 @@ import {
 } from "lucide-react";
 
 const MAX_IMPORT_DIM = 2000;
-const MAX_WARP_DIM = 1600;
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function loadImage(src) {
@@ -37,74 +35,6 @@ async function fileToScaledDataURL(file) {
   c.width = w; c.height = h;
   c.getContext("2d").drawImage(img, 0, 0, w, h);
   return c.toDataURL("image/jpeg", 0.92);
-}
-
-function solveLinear(A, b) {
-  const n = b.length;
-  for (let i = 0; i < n; i++) A[i].push(b[i]);
-  for (let col = 0; col < n; col++) {
-    let piv = col;
-    for (let r = col + 1; r < n; r++)
-      if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
-    [A[col], A[piv]] = [A[piv], A[col]];
-    const d = A[col][col];
-    if (Math.abs(d) < 1e-12) continue;
-    for (let j = col; j <= n; j++) A[col][j] /= d;
-    for (let r = 0; r < n; r++) {
-      if (r === col) continue;
-      const f = A[r][col]; if (!f) continue;
-      for (let j = col; j <= n; j++) A[r][j] -= f * A[col][j];
-    }
-  }
-  return A.map((row) => row[n]);
-}
-
-function perspectiveCoeffs(src, dst) {
-  const A = [], b = [];
-  for (let i = 0; i < 4; i++) {
-    const { x, y } = src[i], { x: u, y: v } = dst[i];
-    A.push([x, y, 1, 0, 0, 0, -x * u, -y * u]); b.push(u);
-    A.push([0, 0, 0, x, y, 1, -x * v, -y * v]); b.push(v);
-  }
-  return solveLinear(A, b);
-}
-
-function warpToCanvas(srcCanvas, corners) {
-  const [tl, tr, br, bl] = corners;
-  let outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
-  let outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
-  const s = Math.min(1, MAX_WARP_DIM / Math.max(outW, outH));
-  outW = Math.max(1, Math.round(outW * s));
-  outH = Math.max(1, Math.round(outH * s));
-  const rect = [
-    { x: 0, y: 0 }, { x: outW, y: 0 },
-    { x: outW, y: outH }, { x: 0, y: outH },
-  ];
-  const H = perspectiveCoeffs(rect, corners);
-  const sctx = srcCanvas.getContext("2d");
-  const sData = sctx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-  const sd = sData.data, sw = srcCanvas.width, sh = srcCanvas.height;
-  const out = document.createElement("canvas");
-  out.width = outW; out.height = outH;
-  const octx = out.getContext("2d");
-  const oData = octx.createImageData(outW, outH);
-  const od = oData.data;
-  for (let y = 0; y < outH; y++) {
-    for (let x = 0; x < outW; x++) {
-      const den = H[6] * x + H[7] * y + 1;
-      const sx = (H[0] * x + H[1] * y + H[2]) / den;
-      const sy = (H[3] * x + H[4] * y + H[5]) / den;
-      const ix = sx | 0, iy = sy | 0;
-      const o = (y * outW + x) * 4;
-      if (ix >= 0 && ix < sw && iy >= 0 && iy < sh) {
-        const si = (iy * sw + ix) * 4;
-        od[o] = sd[si]; od[o + 1] = sd[si + 1];
-        od[o + 2] = sd[si + 2]; od[o + 3] = 255;
-      } else { od[o + 3] = 255; od[o] = od[o + 1] = od[o + 2] = 255; }
-    }
-  }
-  octx.putImageData(oData, 0, 0);
-  return out;
 }
 
 function applyAdjust(d, brightness, contrast) {
@@ -153,22 +83,6 @@ function adaptiveBW(data, w, h) {
   }
 }
 
-function magicColor(d) {
-  let max = 1;
-  for (let i = 0; i < d.length; i += 4)
-    max = Math.max(max, d[i], d[i + 1], d[i + 2]);
-  const g = 255 / max;
-  for (let i = 0; i < d.length; i += 4) {
-    let r = d[i] * g, gr = d[i + 1] * g, b = d[i + 2] * g;
-    const lum = 0.299 * r + 0.587 * gr + 0.114 * b;
-    const sat = 1.25;
-    r = clamp(lum + (r - lum) * sat, 0, 255);
-    gr = clamp(lum + (gr - lum) * sat, 0, 255);
-    b = clamp(lum + (b - lum) * sat, 0, 255);
-    d[i] = r; d[i + 1] = gr; d[i + 2] = b;
-  }
-}
-
 async function getBaseCanvas(page) {
   const img = await loadImage(page.original);
   const rot = page.rotation % 360;
@@ -201,18 +115,11 @@ async function processPage(page) {
   return warped.toDataURL("image/jpeg", 0.92);
 }
 
-/* ============================================================
-   IMPROVED AUTO-CROP: Sobel edge detection + projection scoring
-   Works on varied/textured backgrounds, not just solid colors.
-   ============================================================ */
 async function autoCorners(page) {
   const base = await getBaseCanvas(page);
   return await detectDocument(base);
 }
 
-/* ============================================================
-   UI
-   ============================================================ */
 const FILTERS = [
   { id: "original", label: "Original", icon: ImageIcon },
   { id: "magic", label: "Magic Color", icon: Sparkles },
@@ -226,6 +133,7 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [busy, setBusy] = useState("");
+  const [showCam, setShowCam] = useState(false);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -233,6 +141,7 @@ export default function App() {
     l.rel = "stylesheet";
     l.href = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Spline+Sans:wght@400;500;600&display=swap";
     document.head.appendChild(l);
+    ensureOpenCV().catch(() => {}); // start the edge-detector download in the background
   }, []);
 
   const editPage = pages.find((p) => p.id === editId);
@@ -252,6 +161,11 @@ export default function App() {
     }
     setBusy("");
     setView("gallery");
+  }
+
+  async function handleCapture(blob) {
+    setShowCam(false);
+    await handleFiles([blob]);
   }
 
   async function exportPDF() {
@@ -348,9 +262,7 @@ export default function App() {
       <div className="app-bg">
         <header className="app-header">
           <div className="app-header-inner">
-            <div className="app-header-logo">
-              <ScanLine size={20} />
-            </div>
+            <div className="app-header-logo"><ScanLine size={20} /></div>
             <div className="app-header-text">
               <h1 className="app-header-title">PaperPress</h1>
               <p className="app-header-sub">{pages.length} page{pages.length !== 1 && "s"} · client-side scanner</p>
@@ -366,10 +278,7 @@ export default function App() {
         <main className="app-main">
           {busy && (
             <div className="busy-overlay">
-              <div className="busy-box">
-                <Loader2 size={20} className="spin" />
-                <span>{busy}</span>
-              </div>
+              <div className="busy-box"><Loader2 size={20} className="spin" /><span>{busy}</span></div>
             </div>
           )}
 
@@ -380,6 +289,7 @@ export default function App() {
                 pages={pages} selected={selected} toggleSel={toggleSel}
                 onEdit={(id) => { setEditId(id); setView("edit"); }}
                 onAdd={() => fileRef.current?.click()}
+                onScan={() => setShowCam(true)}
                 movePage={movePage}
               />}
         </main>
@@ -400,8 +310,11 @@ export default function App() {
                 </div>
               )}
               <div className="action-bar-row">
-                <button onClick={() => fileRef.current?.click()} className="btn-primary">
-                  <Upload size={16} />Add pages
+                <button onClick={() => setShowCam(true)} className="btn-primary">
+                  <CameraIcon size={16} />Scan
+                </button>
+                <button onClick={() => fileRef.current?.click()} className="btn-outline">
+                  <Upload size={16} />Upload
                 </button>
                 <ExportMenu disabled={!pages.length} onPDF={exportPDF} onImages={exportImages} onWord={exportWord} />
               </div>
@@ -412,12 +325,14 @@ export default function App() {
         <input ref={fileRef} type="file" accept="image/*" multiple capture="environment"
           className="hidden-file-input" onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
       </div>
+
+      {showCam && <Camera onCapture={handleCapture} onClose={() => setShowCam(false)} />}
     </div>
   );
 }
 
 /* ---------- Gallery ---------- */
-function Gallery({ pages, selected, toggleSel, onEdit, onAdd, movePage }) {
+function Gallery({ pages, selected, toggleSel, onEdit, onAdd, onScan, movePage }) {
   if (!pages.length)
     return (
       <div className="gallery-empty">
@@ -426,9 +341,10 @@ function Gallery({ pages, selected, toggleSel, onEdit, onAdd, movePage }) {
         <p className="gallery-empty-desc">
           Snap a photo or pick images. Edges get straightened, then export as PDF, images, or Word.
         </p>
-        <button onClick={onAdd} className="gallery-empty-btn">
-          <CameraIcon size={16} />Capture / Upload
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onScan} className="gallery-empty-btn"><CameraIcon size={16} />Scan</button>
+          <button onClick={onAdd} className="btn-outline"><Upload size={16} />Upload</button>
+        </div>
       </div>
     );
 
@@ -449,9 +365,7 @@ function Gallery({ pages, selected, toggleSel, onEdit, onAdd, movePage }) {
                 <button onClick={() => movePage(p.id, -1)} className="gallery-card-move-btn"><ChevronLeft size={14} /></button>
                 <button onClick={() => movePage(p.id, 1)} className="gallery-card-move-btn"><ChevronRight size={14} /></button>
               </div>
-              <button onClick={() => onEdit(p.id)} className="gallery-card-edit-btn">
-                <Crop size={12} />Edit
-              </button>
+              <button onClick={() => onEdit(p.id)} className="gallery-card-edit-btn"><Crop size={12} />Edit</button>
             </div>
           </div>
         );
@@ -489,7 +403,8 @@ function ExportMenu({ disabled, onPDF, onImages, onWord }) {
 }
 
 /* ============================================================
-   IMPROVED EDITOR — larger handles, overlay mask, active highlight
+   EDITOR — SVG viewBox locked to the image, so the crop box
+   always sits exactly on the photo at any screen size.
    ============================================================ */
 function Editor({ page, onClose, onSave }) {
   const [local, setLocal] = useState(page);
@@ -498,10 +413,8 @@ function Editor({ page, onClose, onSave }) {
   const [preview, setPreview] = useState(page.thumb);
   const [drag, setDrag] = useState(-1);
   const [busy, setBusy] = useState(false);
-  const stageRef = useRef(null);
-  const [stageW, setStageW] = useState(0);
+  const imgRef = useRef(null);
 
-  // build rotated base canvas
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -513,22 +426,6 @@ function Editor({ page, onClose, onSave }) {
     return () => { alive = false; };
   }, [local.rotation, local.original]); // eslint-disable-line
 
-  const imgRef = useRef(null);
-  const [imgBox, setImgBox] = useState({ w: 0, h: 0 });
-  const baseUrl = base ? base.toDataURL("image/jpeg", 0.85) : null;
-  const scale = base && imgBox.w ? imgBox.w / base.width : 1;
-  useEffect(() => {
-    const measure = () => {
-      if (imgRef.current) setImgBox({ w: imgRef.current.clientWidth, h: imgRef.current.clientHeight });
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    if (imgRef.current) ro.observe(imgRef.current);
-    window.addEventListener("orientationchange", measure);
-    return () => { ro.disconnect(); window.removeEventListener("orientationchange", measure); };
-  }, [base, baseUrl]); // eslint-disable-line
-
-  // recompute preview
   useEffect(() => {
     if (!base || !corners) return;
     let alive = true;
@@ -545,18 +442,24 @@ function Editor({ page, onClose, onSave }) {
     ];
   }
 
-  // ---- pointer-based dragging (works for mouse AND touch) ----
+  const baseUrl = base ? base.toDataURL("image/jpeg", 0.85) : null;
+
+  // map a pointer event to image-pixel coordinates
+  function eventToPoint(e) {
+    const rect = imgRef.current.getBoundingClientRect();
+    return {
+      x: clamp((e.clientX - rect.left) / rect.width * base.width, 0, base.width),
+      y: clamp((e.clientY - rect.top) / rect.height * base.height, 0, base.height),
+    };
+  }
   function startDrag(e, idx) {
-    e.preventDefault();
-    setDrag(idx);
+    e.preventDefault(); setDrag(idx);
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
   }
   function moveDrag(e) {
-    if (drag < 0 || !base || !stageRef.current) return;
-    const rect = imgRef.current.getBoundingClientRect();
-    const x = clamp((e.clientX - rect.left) / scale, 0, base.width);
-    const y = clamp((e.clientY - rect.top) / scale, 0, base.height);
-    setCorners((c) => c.map((p, i) => (i === drag ? { x, y } : p)));
+    if (drag < 0 || !base || !imgRef.current) return;
+    const p = eventToPoint(e);
+    setCorners((c) => c.map((q, i) => (i === drag ? p : q)));
   }
   function endDrag(e) {
     setDrag(-1);
@@ -565,9 +468,16 @@ function Editor({ page, onClose, onSave }) {
 
   async function doAuto() {
     setBusy(true);
+    try {
+      await ensureOpenCV();
+    } catch {
+      setBusy(false);
+      alert("Edge detector is still downloading (needs internet on first use). Wait a few seconds and try again, or set the corners by hand.");
+      return;
+    }
     const ac = await autoCorners({ ...local }).catch(() => null);
     if (ac) setCorners(ac);
-    else alert("Couldn't detect edges — adjust the corners manually.");
+    else alert("No clear page edges found. Drag the corners by hand — detection works best with the page on a contrasting surface.");
     setBusy(false);
   }
   function resetCorners() {
@@ -580,9 +490,9 @@ function Editor({ page, onClose, onSave }) {
     onSave(np); onClose();
   }
 
-  const sc = corners && scale ? corners.map((p) => ({ x: p.x * scale, y: p.y * scale })) : null;
-  const ptsStr = sc ? sc.map((p) => `${p.x},${p.y}`).join(" ") : "";
-  const HANDLE_R = 16, HIT_R = 30;
+  // handle/stroke sizes in image-pixel units so they scale with the viewBox
+  const U = base ? Math.max(base.width, base.height) / 90 : 4;
+  const ptsStr = corners ? corners.map((p) => `${p.x},${p.y}`).join(" ") : "";
 
   return (
     <div className="editor-wrap">
@@ -593,41 +503,37 @@ function Editor({ page, onClose, onSave }) {
       </div>
 
       <div className="editor-stage-wrap">
-        <div className="editor-stage" ref={stageRef} style={{ touchAction: "none" }}>
+        <div className="editor-stage">
           {baseUrl ? (
-            <>
-              <img ref={imgRef} src={baseUrl} alt="" className="editor-stage-img" draggable={false}
-                onLoad={() => imgRef.current && setImgBox({ w: imgRef.current.clientWidth, h: imgRef.current.clientHeight })} />
-              <svg className="editor-stage-svg" width={imgBox.w} height={imgBox.h}
-                style={{ touchAction: "none", left: "50%", top: "50%", transform: "translate(-50%,-50%)" }}
-                onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
-                {sc && (
-                  <>
-                    <defs>
-                      <mask id="cropMask">
-                        <rect width="100%" height="100%" fill="white" />
-                        <polygon points={ptsStr} fill="black" />
-                      </mask>
-                    </defs>
-                    <rect width="100%" height="100%" fill="rgba(0,0,0,0.55)" mask="url(#cropMask)" />
-                    <polygon points={ptsStr} fill="none" stroke="#f0c987" strokeWidth="2" strokeDasharray="6 3" />
-                    {sc.map((p, i) => (
-                      <g key={i}>
-                        <circle cx={p.x} cy={p.y} r={HIT_R} fill="transparent"
-                          style={{ cursor: "grab", touchAction: "none" }}
-                          onPointerDown={(e) => startDrag(e, i)}
-                          onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} />
-                        <circle cx={p.x} cy={p.y} r={HANDLE_R + 4}
-                          fill={drag === i ? "rgba(240,201,135,0.35)" : "rgba(240,201,135,0.15)"} style={{ pointerEvents: "none" }} />
-                        <circle cx={p.x} cy={p.y} r={HANDLE_R} fill={drag === i ? "#f0c987" : "#1c1814"}
-                          stroke="#f0c987" strokeWidth={drag === i ? 3 : 2} style={{ pointerEvents: "none" }} />
-                        <circle cx={p.x} cy={p.y} r={4} fill={drag === i ? "#1c1814" : "#f0c987"} style={{ pointerEvents: "none" }} />
-                      </g>
-                    ))}
-                  </>
-                )}
-              </svg>
-            </>
+            <div className="editor-canvas">
+              <img ref={imgRef} src={baseUrl} alt="" className="editor-stage-img" draggable={false} />
+              {base && corners && (
+                <svg className="editor-stage-svg"
+                  viewBox={`0 0 ${base.width} ${base.height}`} preserveAspectRatio="none"
+                  onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+                  <defs>
+                    <mask id="cropMask">
+                      <rect width="100%" height="100%" fill="white" />
+                      <polygon points={ptsStr} fill="black" />
+                    </mask>
+                  </defs>
+                  <rect width="100%" height="100%" fill="rgba(0,0,0,0.5)" mask="url(#cropMask)" />
+                  <polygon points={ptsStr} fill="none" stroke="#f0c987" strokeWidth={U * 0.5} strokeDasharray={`${U * 1.5} ${U * 0.8}`} />
+                  {corners.map((p, i) => (
+                    <g key={i}>
+                      <circle cx={p.x} cy={p.y} r={U * 6} fill="transparent" style={{ cursor: "grab" }}
+                        onPointerDown={(e) => startDrag(e, i)}
+                        onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} />
+                      <circle cx={p.x} cy={p.y} r={U * 3.4}
+                        fill={drag === i ? "rgba(240,201,135,0.35)" : "rgba(240,201,135,0.18)"} style={{ pointerEvents: "none" }} />
+                      <circle cx={p.x} cy={p.y} r={U * 2.4} fill={drag === i ? "#f0c987" : "#1c1814"}
+                        stroke="#f0c987" strokeWidth={U * 0.5} style={{ pointerEvents: "none" }} />
+                      <circle cx={p.x} cy={p.y} r={U * 0.8} fill={drag === i ? "#1c1814" : "#f0c987"} style={{ pointerEvents: "none" }} />
+                    </g>
+                  ))}
+                </svg>
+              )}
+            </div>
           ) : (
             <div className="editor-stage-loading"><Loader2 size={32} className="spin" /></div>
           )}
@@ -668,9 +574,7 @@ function Editor({ page, onClose, onSave }) {
 
 function EditBtn({ onClick, icon: Icon, label }) {
   return (
-    <button onClick={onClick} className="edit-action-btn">
-      <Icon size={14} />{label}
-    </button>
+    <button onClick={onClick} className="edit-action-btn"><Icon size={14} />{label}</button>
   );
 }
 
