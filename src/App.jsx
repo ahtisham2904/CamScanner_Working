@@ -499,8 +499,9 @@ function Editor({ page, onClose, onSave }) {
   const [drag, setDrag] = useState(-1);
   const [busy, setBusy] = useState(false);
   const stageRef = useRef(null);
-  const [stageSize, setStageSize] = useState({ w: 1, h: 1 });
+  const [stageW, setStageW] = useState(0);
 
+  // build rotated base canvas
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -512,6 +513,18 @@ function Editor({ page, onClose, onSave }) {
     return () => { alive = false; };
   }, [local.rotation, local.original]); // eslint-disable-line
 
+  // track stage width responsively (handles resize + rotation)
+  useEffect(() => {
+    if (!stageRef.current) return;
+    const measure = () => stageRef.current && setStageW(stageRef.current.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(stageRef.current);
+    window.addEventListener("orientationchange", measure);
+    return () => { ro.disconnect(); window.removeEventListener("orientationchange", measure); };
+  }, [base]);
+
+  // recompute preview
   useEffect(() => {
     if (!base || !corners) return;
     let alive = true;
@@ -523,89 +536,68 @@ function Editor({ page, onClose, onSave }) {
   function defaultCorners(b) {
     const pad = Math.min(b.width, b.height) * 0.08;
     return [
-      { x: pad, y: pad },
-      { x: b.width - pad, y: pad },
-      { x: b.width - pad, y: b.height - pad },
-      { x: pad, y: b.height - pad },
+      { x: pad, y: pad }, { x: b.width - pad, y: pad },
+      { x: b.width - pad, y: b.height - pad }, { x: pad, y: b.height - pad },
     ];
   }
 
   const baseUrl = base ? base.toDataURL("image/jpeg", 0.85) : null;
-  const scale = base ? stageSize.w / base.width : 1;
+  const scale = base && stageW ? stageW / base.width : 1;
 
-  // Pointer handling — supports both mouse and touch
+  // ---- pointer-based dragging (works for mouse AND touch) ----
   function startDrag(e, idx) {
     e.preventDefault();
-    e.stopPropagation();
     setDrag(idx);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
   }
-
-  function onMove(e) {
+  function moveDrag(e) {
     if (drag < 0 || !base || !stageRef.current) return;
     const rect = stageRef.current.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    const x = clamp((clientX - rect.left) / scale, 0, base.width);
-    const y = clamp((clientY - rect.top) / scale, 0, base.height);
+    const x = clamp((e.clientX - rect.left) / scale, 0, base.width);
+    const y = clamp((e.clientY - rect.top) / scale, 0, base.height);
     setCorners((c) => c.map((p, i) => (i === drag ? { x, y } : p)));
   }
-
-  function endDrag() { setDrag(-1); }
+  function endDrag(e) {
+    setDrag(-1);
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+  }
 
   async function doAuto() {
     setBusy(true);
     const ac = await autoCorners({ ...local }).catch(() => null);
     if (ac) setCorners(ac);
-    else alert("Couldn't detect edges automatically — please adjust manually.");
+    else alert("Couldn't detect edges — adjust the corners manually.");
     setBusy(false);
   }
-
   function resetCorners() {
     if (!base) return;
     setCorners([{ x: 0, y: 0 }, { x: base.width, y: 0 }, { x: base.width, y: base.height }, { x: 0, y: base.height }]);
   }
-
   async function save() {
     const np = { ...local, corners };
     np.thumb = await processPage(np);
     onSave(np); onClose();
   }
 
-  // Build SVG overlay: darkened mask outside quad + corner handles
-  const sc = corners ? corners.map((p) => ({ x: p.x * scale, y: p.y * scale })) : null;
+  const sc = corners && scale ? corners.map((p) => ({ x: p.x * scale, y: p.y * scale })) : null;
   const ptsStr = sc ? sc.map((p) => `${p.x},${p.y}`).join(" ") : "";
-  const HANDLE_R = 18;   // touch-friendly radius
-  const HIT_R = 28;      // invisible hit area radius
+  const HANDLE_R = 16, HIT_R = 30;
 
   return (
-    <div className="editor-wrap"
-      onMouseMove={onMove} onMouseUp={endDrag}
-      onTouchMove={onMove} onTouchEnd={endDrag}>
-
+    <div className="editor-wrap">
       <div className="editor-header">
         <button onClick={onClose} className="editor-cancel"><X size={16} />Cancel</button>
         <h2 className="editor-title">Edit page</h2>
         <button onClick={save} className="editor-done"><Check size={16} />Done</button>
       </div>
 
-      {/* crop stage */}
       <div className="editor-stage-wrap">
-        <div
-          className="editor-stage"
-          ref={(el) => {
-            stageRef.current = el;
-            if (el && base) {
-              const w = el.clientWidth;
-              if (Math.abs(w - stageSize.w) > 1)
-                setStageSize({ w, h: (base.height / base.width) * w });
-            }
-          }}
-        >
+        <div className="editor-stage" ref={stageRef} style={{ touchAction: "none" }}>
           {baseUrl ? (
             <>
               <img src={baseUrl} alt="" className="editor-stage-img" draggable={false} />
-              <svg className="editor-stage-svg" style={{ touchAction: "none" }}>
-                {/* dark overlay outside the crop quad */}
+              <svg className="editor-stage-svg" style={{ touchAction: "none" }}
+                onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
                 {sc && (
                   <>
                     <defs>
@@ -615,39 +607,18 @@ function Editor({ page, onClose, onSave }) {
                       </mask>
                     </defs>
                     <rect width="100%" height="100%" fill="rgba(0,0,0,0.55)" mask="url(#cropMask)" />
-                    {/* crop quad border */}
                     <polygon points={ptsStr} fill="none" stroke="#f0c987" strokeWidth="2" strokeDasharray="6 3" />
-                    {/* edge lines with midpoint indicators */}
-                    {[0,1,2,3].map(i => {
-                      const a = sc[i], b2 = sc[(i+1)%4];
-                      const mx = (a.x + b2.x) / 2, my = (a.y + b2.y) / 2;
-                      return (
-                        <g key={i}>
-                          <circle cx={mx} cy={my} r="5" fill="rgba(240,201,135,0.7)" />
-                        </g>
-                      );
-                    })}
-                    {/* corner handles */}
                     {sc.map((p, i) => (
                       <g key={i}>
-                        {/* invisible large hit area */}
                         <circle cx={p.x} cy={p.y} r={HIT_R} fill="transparent"
-                          style={{ cursor: "grab" }}
-                          onMouseDown={(e) => startDrag(e, i)}
-                          onTouchStart={(e) => startDrag(e, i)} />
-                        {/* outer glow ring */}
+                          style={{ cursor: "grab", touchAction: "none" }}
+                          onPointerDown={(e) => startDrag(e, i)}
+                          onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} />
                         <circle cx={p.x} cy={p.y} r={HANDLE_R + 4}
-                          fill={drag === i ? "rgba(240,201,135,0.35)" : "rgba(240,201,135,0.15)"}
-                          style={{ pointerEvents: "none" }} />
-                        {/* main handle */}
-                        <circle cx={p.x} cy={p.y} r={HANDLE_R}
-                          fill={drag === i ? "#f0c987" : "#1c1814"}
-                          stroke="#f0c987" strokeWidth={drag === i ? 3 : 2}
-                          style={{ pointerEvents: "none" }} />
-                        {/* corner dot */}
-                        <circle cx={p.x} cy={p.y} r={4}
-                          fill={drag === i ? "#1c1814" : "#f0c987"}
-                          style={{ pointerEvents: "none" }} />
+                          fill={drag === i ? "rgba(240,201,135,0.35)" : "rgba(240,201,135,0.15)"} style={{ pointerEvents: "none" }} />
+                        <circle cx={p.x} cy={p.y} r={HANDLE_R} fill={drag === i ? "#f0c987" : "#1c1814"}
+                          stroke="#f0c987" strokeWidth={drag === i ? 3 : 2} style={{ pointerEvents: "none" }} />
+                        <circle cx={p.x} cy={p.y} r={4} fill={drag === i ? "#1c1814" : "#f0c987"} style={{ pointerEvents: "none" }} />
                       </g>
                     ))}
                   </>
@@ -655,33 +626,23 @@ function Editor({ page, onClose, onSave }) {
               </svg>
             </>
           ) : (
-            <div className="editor-stage-loading">
-              <Loader2 size={32} className="spin" />
-            </div>
+            <div className="editor-stage-loading"><Loader2 size={32} className="spin" /></div>
           )}
         </div>
-
         <div className="editor-stage-controls">
           <EditBtn onClick={doAuto} icon={Wand2} label="Auto detect" />
           <EditBtn onClick={resetCorners} icon={Square} label="Full image" />
-          <EditBtn
-            onClick={() => setLocal((l) => ({ ...l, rotation: (l.rotation + 90) % 360, corners: null }))}
-            icon={RotateCw} label="Rotate" />
+          <EditBtn onClick={() => setLocal((l) => ({ ...l, rotation: (l.rotation + 90) % 360, corners: null }))} icon={RotateCw} label="Rotate" />
         </div>
       </div>
 
-      {/* hint text */}
-      <p className="editor-crop-hint">Drag the corner handles to adjust the crop area</p>
+      <p className="editor-crop-hint">Drag the corner handles to adjust the crop</p>
 
-      {/* live result preview */}
       <div className="editor-preview-section">
         <p className="editor-preview-label">Result preview {busy && "…"}</p>
-        <div className="editor-preview-frame">
-          {preview && <img src={preview} alt="" />}
-        </div>
+        <div className="editor-preview-frame">{preview && <img src={preview} alt="" />}</div>
       </div>
 
-      {/* filters */}
       <div className="editor-filters">
         {FILTERS.map((f) => {
           const on = local.filter === f.id;
