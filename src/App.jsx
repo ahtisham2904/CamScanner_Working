@@ -1,9 +1,11 @@
 import "./App.css";
 import { jsPDF } from "jspdf";
+import { detectDocument, magicColorPro, warpBilinear, ensureOpenCV } from "./lib/scanner";
+import Camera from "./Camera";
 import JSZip from "jszip";
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
-  Camera, Upload, Image as ImageIcon, FileText, FileDown, Trash2,
+  Camera as CameraIcon, Upload, Image as ImageIcon, FileText, FileDown, Trash2,
   RotateCw, Check, X, Crop, Wand2, Sparkles,
   ChevronLeft, ChevronRight, Sun, Contrast, ScanLine, Files, Loader2, Square,
 } from "lucide-react";
@@ -187,13 +189,13 @@ async function processPage(page) {
     { x: 0, y: 0 }, { x: base.width, y: 0 },
     { x: base.width, y: base.height }, { x: 0, y: base.height },
   ];
-  const warped = warpToCanvas(base, corners);
+  const warped = warpBilinear(base, corners);
   const ctx = warped.getContext("2d");
   const imgData = ctx.getImageData(0, 0, warped.width, warped.height);
   const d = imgData.data;
   if (page.filter === "grayscale") { applyAdjust(d, page.brightness, page.contrast); toGrayscale(d); }
   else if (page.filter === "bw") { applyAdjust(d, page.brightness, page.contrast); adaptiveBW(d, warped.width, warped.height); }
-  else if (page.filter === "magic") { magicColor(d); applyAdjust(d, page.brightness, page.contrast); }
+  else if (page.filter === "magic") { magicColorPro(d, warped.width, warped.height); applyAdjust(d, page.brightness, page.contrast); }
   else { applyAdjust(d, page.brightness, page.contrast); }
   ctx.putImageData(imgData, 0, 0);
   return warped.toDataURL("image/jpeg", 0.92);
@@ -205,98 +207,7 @@ async function processPage(page) {
    ============================================================ */
 async function autoCorners(page) {
   const base = await getBaseCanvas(page);
-  const W = base.width, H = base.height;
-
-  // Work at a small size for speed
-  const SW = 320, SH = Math.round((H / W) * 320);
-  const small = document.createElement("canvas");
-  small.width = SW; small.height = SH;
-  const sctx = small.getContext("2d");
-  sctx.drawImage(base, 0, 0, SW, SH);
-  const { data } = sctx.getImageData(0, 0, SW, SH);
-
-  // Convert to grayscale float
-  const gray = new Float32Array(SW * SH);
-  for (let i = 0, p = 0; i < data.length; i += 4, p++)
-    gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-
-  // Sobel edge magnitude
-  const edge = new Float32Array(SW * SH);
-  let maxE = 1;
-  for (let y = 1; y < SH - 1; y++) {
-    for (let x = 1; x < SW - 1; x++) {
-      const g = (r, c) => gray[(y + r) * SW + (x + c)];
-      const gx = -g(-1,-1) + g(-1,1) - 2*g(0,-1) + 2*g(0,1) - g(1,-1) + g(1,1);
-      const gy = -g(-1,-1) - 2*g(-1,0) - g(-1,1) + g(1,-1) + 2*g(1,0) + g(1,1);
-      const m = Math.sqrt(gx * gx + gy * gy);
-      edge[y * SW + x] = m;
-      if (m > maxE) maxE = m;
-    }
-  }
-
-  // Threshold: keep strong edges only
-  const thresh = maxE * 0.15;
-  const bin = new Uint8Array(SW * SH);
-  for (let i = 0; i < edge.length; i++) bin[i] = edge[i] > thresh ? 1 : 0;
-
-  // Project onto X and Y axes to find document boundaries
-  const projX = new Float32Array(SW); // column sums
-  const projY = new Float32Array(SH); // row sums
-  for (let y = 0; y < SH; y++)
-    for (let x = 0; x < SW; x++) {
-      if (bin[y * SW + x]) { projX[x]++; projY[y]++; }
-    }
-
-  // Smooth projections
-  const smooth = (arr, r = 3) => {
-    const out = new Float32Array(arr.length);
-    for (let i = 0; i < arr.length; i++) {
-      let s = 0, c = 0;
-      for (let j = Math.max(0, i - r); j <= Math.min(arr.length - 1, i + r); j++) { s += arr[j]; c++; }
-      out[i] = s / c;
-    }
-    return out;
-  };
-  const sx = smooth(projX), sy = smooth(projY);
-
-  // Find the strongest left/right/top/bottom edge band
-  // by finding peaks in the projection from each side
-  const margin = Math.round(SW * 0.05); // ignore outermost 5%
-
-  const findBoundary = (proj, lo, hi, fromEnd) => {
-    let bestVal = -1, bestIdx = fromEnd ? hi : lo;
-    const step = fromEnd ? -1 : 1;
-    const start = fromEnd ? hi : lo;
-    const end = fromEnd ? lo : hi;
-    // scan inward from the edge, looking for the first strong peak
-    for (let i = start; fromEnd ? i >= end : i <= end; i += step) {
-      if (proj[i] > bestVal) { bestVal = proj[i]; bestIdx = i; }
-      // stop once we've clearly passed the peak and gone 15% into image
-      if (bestVal > 0 && proj[i] < bestVal * 0.4) {
-        const pct = fromEnd ? (hi - i) / (hi - lo) : (i - lo) / (hi - lo);
-        if (pct > 0.15) break;
-      }
-    }
-    return bestIdx;
-  };
-
-  const x1s = findBoundary(sx, margin, Math.floor(SW * 0.5), false);
-  const x2s = findBoundary(sx, Math.ceil(SW * 0.5), SW - 1 - margin, true);
-  const y1s = findBoundary(sy, margin, Math.floor(SH * 0.5), false);
-  const y2s = findBoundary(sy, Math.ceil(SH * 0.5), SH - 1 - margin, true);
-
-  // Sanity check — must be at least 20% of image
-  if ((x2s - x1s) < SW * 0.2 || (y2s - y1s) < SH * 0.2) return null;
-
-  // Scale back to full image coordinates with a small inward pad
-  const fx = W / SW, fy = H / SH;
-  const pad = 4;
-  const x1 = clamp((x1s - pad) * fx, 0, W);
-  const y1 = clamp((y1s - pad) * fy, 0, H);
-  const x2 = clamp((x2s + pad) * fx, 0, W);
-  const y2 = clamp((y2s + pad) * fy, 0, H);
-
-  return [{ x: x1, y: y1 }, { x: x2, y: y1 }, { x: x2, y: y2 }, { x: x1, y: y2 }];
+  return await detectDocument(base);
 }
 
 /* ============================================================
@@ -518,7 +429,7 @@ function Gallery({ pages, selected, toggleSel, onEdit, onAdd, movePage }) {
           Snap a photo or pick images. Edges get straightened, then export as PDF, images, or Word.
         </p>
         <button onClick={onAdd} className="gallery-empty-btn">
-          <Camera size={16} />Capture / Upload
+          <CameraIcon size={16} />Capture / Upload
         </button>
       </div>
     );
