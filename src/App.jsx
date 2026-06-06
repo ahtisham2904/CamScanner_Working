@@ -513,16 +513,18 @@ function Editor({ page, onClose, onSave }) {
     return () => { alive = false; };
   }, [local.rotation, local.original]); // eslint-disable-line
 
-  // track stage width responsively (handles resize + rotation)
+  const imgRef = useRef(null);
+  const [imgBox, setImgBox] = useState({ w: 0, h: 0 });
   useEffect(() => {
-    if (!stageRef.current) return;
-    const measure = () => stageRef.current && setStageW(stageRef.current.clientWidth);
+    const measure = () => {
+      if (imgRef.current) setImgBox({ w: imgRef.current.clientWidth, h: imgRef.current.clientHeight });
+    };
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(stageRef.current);
+    if (imgRef.current) ro.observe(imgRef.current);
     window.addEventListener("orientationchange", measure);
     return () => { ro.disconnect(); window.removeEventListener("orientationchange", measure); };
-  }, [base]);
+  }, [base, baseUrl]); // eslint-disable-line
 
   // recompute preview
   useEffect(() => {
@@ -542,7 +544,7 @@ function Editor({ page, onClose, onSave }) {
   }
 
   const baseUrl = base ? base.toDataURL("image/jpeg", 0.85) : null;
-  const scale = base && stageW ? stageW / base.width : 1;
+  const scale = base && imgBox.w ? imgBox.w / base.width : 1;
 
   // ---- pointer-based dragging (works for mouse AND touch) ----
   function startDrag(e, idx) {
@@ -552,7 +554,7 @@ function Editor({ page, onClose, onSave }) {
   }
   function moveDrag(e) {
     if (drag < 0 || !base || !stageRef.current) return;
-    const rect = stageRef.current.getBoundingClientRect();
+    const rect = imgRef.current.getBoundingClientRect();
     const x = clamp((e.clientX - rect.left) / scale, 0, base.width);
     const y = clamp((e.clientY - rect.top) / scale, 0, base.height);
     setCorners((c) => c.map((p, i) => (i === drag ? { x, y } : p)));
@@ -595,8 +597,10 @@ function Editor({ page, onClose, onSave }) {
         <div className="editor-stage" ref={stageRef} style={{ touchAction: "none" }}>
           {baseUrl ? (
             <>
-              <img src={baseUrl} alt="" className="editor-stage-img" draggable={false} />
-              <svg className="editor-stage-svg" style={{ touchAction: "none" }}
+              <img ref={imgRef} src={baseUrl} alt="" className="editor-stage-img" draggable={false}
+                onLoad={() => imgRef.current && setImgBox({ w: imgRef.current.clientWidth, h: imgRef.current.clientHeight })} />
+              <svg className="editor-stage-svg" width={imgBox.w} height={imgBox.h}
+                style={{ touchAction: "none", left: "50%", top: "50%", transform: "translate(-50%,-50%)" }}
                 onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
                 {sc && (
                   <>
