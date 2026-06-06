@@ -12,31 +12,32 @@
 
     /* ---------- OpenCV loader (robust across builds) ---------- */
     let cvPromise = null;
-    export function ensureOpenCV() {
-    if (cvPromise) return cvPromise;
-    cvPromise = new Promise((resolve, reject) => {
-        if (window.cv && window.cv.Mat) return resolve(window.cv);
-        const ready = () => {
-        if (window.cv && window.cv.Mat) resolve(window.cv);
-        else setTimeout(ready, 50);
-        };
-        let s = document.getElementById("opencv-js");
-        if (!s) {
-        s = document.createElement("script");
-        s.id = "opencv-js";
-        s.async = true;
-        s.src = "https://docs.opencv.org/4.9.0/opencv.js";
-        s.onerror = () => reject(new Error("Failed to load OpenCV.js"));
-        s.onload = () => {
-            // some builds expose cv as a Promise/Module
-            if (window.cv && typeof window.cv.then === "function") {
-            window.cv.then((c) => { window.cv = c; resolve(c); });
-            } else ready();
-        };
-        document.body.appendChild(s);
+export function ensureOpenCV() {
+  if (cvPromise) return cvPromise;
+  cvPromise = new Promise((resolve, reject) => {
+    if (window.cv && window.cv.Mat) return resolve(window.cv);
+    const deadline = Date.now() + 20000; // 20s max, then give up
+    const ready = () => {
+      if (window.cv && window.cv.Mat) return resolve(window.cv);
+      if (Date.now() > deadline) { cvPromise = null; return reject(new Error("OpenCV load timed out")); }
+      setTimeout(ready, 50);
+    };
+    let s = document.getElementById("opencv-js");
+    if (!s) {
+      s = document.createElement("script");
+      s.id = "opencv-js";
+      s.async = true;
+      s.src = "https://docs.opencv.org/4.9.0/opencv.js";
+      s.onerror = () => { cvPromise = null; reject(new Error("Failed to load OpenCV.js")); };
+      s.onload = () => {
+        if (window.cv && typeof window.cv.then === "function") {
+          window.cv.then((c) => { window.cv = c; resolve(c); });
         } else ready();
-    });
-    return cvPromise;
+      };
+      document.body.appendChild(s);
+    } else ready();
+  });
+  return cvPromise;
 }
 
     /* order 4 points -> [TL, TR, BR, BL] (classic sum/diff method) */
